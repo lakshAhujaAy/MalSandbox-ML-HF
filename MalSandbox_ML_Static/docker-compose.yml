@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  # ── Message broker ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Main API ──────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SANDBOX_IMAGE=sandbox-worker:latest
+      - ML_TIMEOUT=30
+      - MAX_WORKERS=3
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./backend:/app
+      - sandbox-results:/tmp/sandbox-results
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── ML worker (runs all 3 models) ────────────────────────────────────────────
+  ml-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.ml
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - MODEL_PATH=/app/models
+    volumes:
+      - ./backend:/app
+      - ml-models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python -m ml.worker
+
+  # ── Sandbox executor image (built separately, used by API) ────────────────────
+  sandbox-builder:
+    build:
+      context: ./docker/sandbox
+      dockerfile: Dockerfile
+    image: sandbox-worker:latest
+    command: echo "Sandbox image ready"
+
+  # ── React frontend ────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - api
+
+volumes:
+  sandbox-results:
+  ml-models:
